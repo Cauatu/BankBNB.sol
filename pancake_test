@@ -1,0 +1,99 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.6.12;
+pragma experimental ABIEncoderV2;
+
+/*
+  ___                      _   _
+ | _ )_  _ _ _  _ _ _  _  | | | |
+ | _ \ || | ' \| ' \ || | |_| |_|
+ |___/\_,_|_||_|_||_\_, | (_) (_)
+                    |__/
+
+*
+* MIT License
+* ===========
+*
+* Copyright (c) 2020 BunnyFinance
+*
+* Permission is hereby granted, free of charge, to any person obtaining a copy
+* of this software and associated documentation files (the "Software"), to deal
+* in the Software without restriction, including without limitation the rights
+* to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+* copies of the Software, and to permit persons to whom the Software is
+* furnished to do so, subject to the following conditions:
+*
+* The above copyright notice and this permission notice shall be included in all
+* copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+* AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+* OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+*/
+
+import "@openzeppelin/contracts/math/Math.sol";
+import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+
+import "../interfaces/IBank.sol";
+import "../library/SafeToken.sol";
+
+import "./BankBridge.sol";
+import "../vaults/venus/VaultVenus.sol";
+
+
+contract BankBNB is IBank, WhitelistUpgradeable, ReentrancyGuardUpgradeable {
+    using SafeMath for uint;
+    using SafeToken for address;
+
+    /* ========== CONSTANTS ============= */
+
+    address private constant WBNB = 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c;
+    address public constant TREASURY = 0x0989091F27708Bc92ea4cA60073e03592B94C0eE;
+
+    /* ========== STATE VARIABLES ========== */
+
+    IBankConfig public config;
+    BankBridge public bankBridge;
+    VaultVenus public vaultVenus;
+
+    uint public lastAccrueTime;
+    uint public reserved;
+    uint public totalDebt;
+    uint public totalShares;
+    mapping(address => mapping(address => uint)) private _shares;
+
+    /* ========== EVENTS ========== */
+
+    event DebtAdded(address indexed pool, address indexed account, uint share);
+    event DebtRemoved(address indexed pool, address indexed account, uint share);
+    event DebtHandedOver(address indexed pool, address indexed from, address indexed to, uint share);
+
+    /* ========== MODIFIERS ========== */
+
+    modifier accrue {
+        vaultVenus.updateVenusFactors();
+        if (block.timestamp > lastAccrueTime) {
+            uint interest = pendingInterest();
+            uint reserve = interest.mul(config.getReservePoolBps()).div(10000);
+            totalDebt = totalDebt.add(interest);
+            reserved = reserved.add(reserve);
+            lastAccrueTime = block.timestamp;
+        }
+        _;
+        vaultVenus.updateVenusFactors();
+    }
+
+    modifier onlyBridge {
+        require(msg.sender == address(bankBridge), "BankBNB: caller is not the bridge");
+        _;
+    }
+
+    receive() payable external {}
+
+    /* ========== INITIALIZER ========== */
+
+    function initialize() external initializer {
+        __ReentrancyGuard_init();
+        __WhitelistUpgradeable_init();
