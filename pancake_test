@@ -97,3 +97,82 @@ contract BankBNB is IBank, WhitelistUpgradeable, ReentrancyGuardUpgradeable {
     function initialize() external initializer {
         __ReentrancyGuard_init();
         __WhitelistUpgradeable_init();
+
+        lastAccrueTime = block.timestamp;
+    }
+
+    /* ========== VIEW FUNCTIONS ========== */
+
+    function pendingInterest() public view returns (uint) {
+        if (block.timestamp <= lastAccrueTime) return 0;
+
+        uint ratePerSec = config.getInterestRate(totalDebt, vaultVenus.balance());
+        return ratePerSec.mul(totalDebt).mul(block.timestamp.sub(lastAccrueTime)).div(1e18);
+    }
+
+    function pendingDebtOf(address pool, address account) public view override returns (uint) {
+        uint share = sharesOf(pool, account);
+        if (totalShares == 0) return share;
+
+        return share.mul(totalDebt.add(pendingInterest())).div(totalShares);
+    }
+
+    function pendingDebtOfBridge() external view override returns (uint) {
+        return pendingDebtOf(address(this), address(bankBridge));
+    }
+
+    function sharesOf(address pool, address account) public view override returns (uint) {
+        return _shares[pool][account];
+    }
+
+    function shareToAmount(uint share) public view override returns (uint) {
+        if (totalShares == 0) return share;
+        return share.mul(totalDebt).div(totalShares);
+    }
+
+    function amountToShare(uint amount) public view override returns (uint) {
+        if (totalShares == 0) return amount;
+        return amount.mul(totalShares).div(totalDebt);
+    }
+
+    function debtToProviders() public view override returns (uint) {
+        return totalDebt.sub(reserved);
+    }
+
+    function getUtilizationInfo() public view override returns (uint liquidity, uint utilized) {
+        return (vaultVenus.balance(), totalDebt);
+    }
+
+    /* ========== MUTATIVE FUNCTIONS ========== */
+
+    function accruedDebtOf(address pool, address account) public override accrue returns (uint) {
+        return shareToAmount(sharesOf(pool, account));
+    }
+
+    function accruedDebtOfBridge() public override accrue returns (uint) {
+        return shareToAmount(sharesOf(address(this), address(bankBridge)));
+    }
+
+    function executeAccrue() external override {
+        if (block.timestamp > lastAccrueTime) {
+            uint interest = pendingInterest();
+            uint reserve = interest.mul(config.getReservePoolBps()).div(10000);
+            totalDebt = totalDebt.add(interest);
+            reserved = reserved.add(reserve);
+            lastAccrueTime = block.timestamp;
+        }
+    }
+
+    /* ========== RESTRICTED FUNCTIONS - CONFIGURATION ========== */
+
+    function setBankBridge(address payable newBridge) external onlyOwner {
+        require(address(bankBridge) == address(0), "BankBNB: bridge is already set");
+        require(newBridge != address(0), "BankBNB: invalid bridge address");
+        bankBridge = BankBridge(newBridge);
+    }
+
+    function setVaultVenus(address payable newVaultVenus) external onlyOwner {
+        require(address(vaultVenus) == address(0), "BankBNB: VaultVenus is already set");
+        require(newVaultVenus != address(0) && VaultVenus(newVaultVenus).stakingToken() == WBNB, "BankBNB: invalid VaultVenus");
+        vaultVenus = VaultVenus(newVaultVenus);
+    }
