@@ -176,3 +176,76 @@ contract BankBNB is IBank, WhitelistUpgradeable, ReentrancyGuardUpgradeable {
         require(newVaultVenus != address(0) && VaultVenus(newVaultVenus).stakingToken() == WBNB, "BankBNB: invalid VaultVenus");
         vaultVenus = VaultVenus(newVaultVenus);
     }
+
+    function updateConfig(address newConfig) external onlyOwner {
+        require(newConfig != address(0), "BankBNB: invalid config address");
+        config = IBankConfig(newConfig);
+    }
+
+    /* ========== RESTRICTED FUNCTIONS - BANKING ========== */
+
+    function borrow(address pool, address account, uint amount) external override accrue onlyWhitelisted returns (uint debtInBNB) {
+        amount = Math.min(amount, vaultVenus.balance());
+        amount = vaultVenus.borrow(amount);
+        uint share = amountToShare(amount);
+
+        _shares[pool][account] = _shares[pool][account].add(share);
+        totalShares = totalShares.add(share);
+        totalDebt = totalDebt.add(amount);
+
+        SafeToken.safeTransferETH(msg.sender, amount);
+        emit DebtAdded(pool, account, share);
+        return amount;
+    }
+
+//    function repayPartial(address pool, address account) public override payable accrue onlyWhitelisted {
+//        uint debt = accruedDebtOf(pool, account);
+//        uint available = Math.min(msg.value, debt);
+//        vaultVenus.repay{value : available}();
+//
+//        uint share = Math.min(amountToShare(available), _shares[pool][account]);
+//        _shares[pool][account] = _shares[pool][account].sub(share);
+//        totalShares = totalShares.sub(share);
+//        totalDebt = totalDebt.sub(available);
+//        emit DebtRemoved(pool, account, share);
+//
+//        if (totalDebt < reserved) {
+//            _decreaseReserved(TREASURY, reserved);
+//        }
+//    }
+
+    function repayAll(address pool, address account) public override payable accrue onlyWhitelisted returns (uint profitInETH, uint lossInETH) {
+        uint received = msg.value;
+        uint bnbBefore = address(this).balance;
+
+        uint debt = accruedDebtOf(pool, account);
+        uint profit = received > debt ? received.sub(debt) : 0;
+        uint loss = received < debt ? debt.sub(received) : 0;
+
+        profitInETH = profit > 0 ? bankBridge.realizeProfit{value : profit}() : 0;
+        lossInETH = loss > 0 ? bankBridge.realizeLoss(loss) : 0;
+        received =  loss > 0 ? received.add(address(this).balance).sub(bnbBefore) : received.sub(profit);
+
+        uint available = Math.min(received, debt);
+        vaultVenus.repay{value : available}();
+
+        uint share = _shares[pool][account];
+        if (loss > 0) {
+            uint unpaidDebtShare = Math.min(amountToShare(loss), share);
+            _shares[address(this)][address(bankBridge)] = _shares[address(this)][address(bankBridge)].add(unpaidDebtShare);
+            emit DebtHandedOver(pool, account, msg.sender, unpaidDebtShare);
+
+            share = share.sub(unpaidDebtShare);
+        }
+
+        delete _shares[pool][account];
+        totalShares = totalShares.sub(share);
+        totalDebt = totalDebt.sub(available);
+        emit DebtRemoved(pool, account, share);
+
+        _cleanupDust();
+
+        if (totalDebt < reserved) {
+            _decreaseReserved(TREASURY, reserved);
+        }
+    }
